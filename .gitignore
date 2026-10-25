@@ -1,4 +1,9 @@
-# Python
+# Go
+/bin/
+/family-hub
+*.test
+
+# Python (legacy local artifacts)
 __pycache__/
 *.py[cod]
 .venv/

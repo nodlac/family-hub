@@ -202,7 +202,7 @@ async function loadActivities() {
         activities = await api('/api/initialize', {method:'POST', body:JSON.stringify({seed:bucketListData})});
         renderCards();
     } catch (error) {
-        document.getElementById('app-message').textContent = 'Could not connect to SQLite. Start the app with: python3 server.py (' + error.message + ')';
+        document.getElementById('app-message').textContent = 'Could not connect to the API. Start the app with: go run ./cmd/family-hub (' + error.message + ')';
     }
 }
 
@@ -250,7 +250,7 @@ document.getElementById('activity-form').addEventListener('submit', async event 
     else idea.location = fields.get('distance').trim();
     try {
         activities.push(await api('/api/activities', {method:'POST',body:JSON.stringify(idea)}));
-        event.currentTarget.reset(); renderCards(); document.getElementById('app-message').textContent = 'Activity saved to SQLite.';
+        event.currentTarget.reset(); renderCards(); document.getElementById('app-message').textContent = 'Activity saved.';
     } catch (error) { document.getElementById('app-message').textContent = error.message; }
 });
 

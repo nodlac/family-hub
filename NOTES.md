@@ -34,11 +34,12 @@ Build a private, invite-only family app. The Adventure Bucket List is one featur
 - Keep secrets out of the repository. Pin service image versions and document upgrade/rollback steps.
 - Test a full server reboot and confirm services recover without manual intervention.
 
-## Database decision
-- Keycloak should use a supported production database such as PostgreSQL. Do **not** use Keycloak's development/in-memory database or SQLite for a production Keycloak deployment.
-- The app's own database could use SQLite initially if there is one API instance and low write volume. Use SQLite's online backup mechanism or a consistent snapshot; do not blindly copy a live database file, especially when WAL mode is enabled.
-- PostgreSQL is the simpler overall choice if sharing the database service operationally: run separate databases/roles for Keycloak and the app, and back them up with `pg_dump` (plus periodic full recovery testing). Never have Keycloak and the app share the same database/schema credentials.
-- Decide between SQLite-for-app and PostgreSQL-for-both before implementation. SQLite's file is convenient, but it still needs consistent backups and does not back up configuration, secrets, or uploaded files.
+## Backend and database decisions
+- Use Go for the app API. Keep Caddy and Keycloak as separate services; use a maintained OIDC/JWT library rather than implementing OAuth yourself.
+- The current local prototype uses SQLite via the pure-Go `modernc.org/sqlite` driver.
+- Keycloak must use a supported production database such as PostgreSQL. Do **not** use Keycloak's development/in-memory database or SQLite for production Keycloak.
+- Before family deployment, decide whether the app moves to PostgreSQL too. PostgreSQL for both services is operationally simple, with separate databases and roles. SQLite remains viable for one low-volume API instance, using its online backup mechanism instead of copying a live file blindly.
+- Never have Keycloak and the app share database/schema credentials. Database data, secrets, Caddy config, and app configuration need separate backup consideration.
 
 ## Backup and recovery
 - Back up database data, Keycloak configuration/realm exports, app configuration, Caddy configuration, and required secrets/restore instructions.

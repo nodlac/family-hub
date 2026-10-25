@@ -45,7 +45,7 @@ Future iOS ──┘                       │
 - **Caddy:** HTTPS, reverse proxy, and any agreed IP/network access restrictions.
 - **Keycloak:** self-hosted OIDC identity provider; Google is an upstream sign-in option.
 - **PostgreSQL:** production database for Keycloak. The app can use a separate PostgreSQL database/role, or SQLite if the single-instance/low-write tradeoff is deliberately chosen.
-- **App/API:** owns the app's data and authorization. Clients never connect directly to either database.
+- **Go app/API:** owns the app's data and authorization. Clients never connect directly to either database. Use Go's `net/http` initially, with database access isolated behind app/store code.
 - Keep services on a private server/container network where possible; expose only the required HTTPS endpoints.
 
 ## Authentication and network access
@@ -89,9 +89,11 @@ All API queries must scope data by authenticated user membership in the relevant
 ### Recommendation
 Use PostgreSQL for Keycloak; Keycloak's supported production database choices include PostgreSQL, and SQLite is not a supported production Keycloak database. Do not use its development/in-memory database for the family service.
 
-For the app database:
-- **Simplest overall operations:** use the same PostgreSQL server but create a separate database and least-privilege database role for the app. Keep Keycloak and app data/credentials separate. This gives one database service to secure, start, monitor, and back up.
-- **SQLite is viable for the app** if it remains a single API instance with modest write concurrency. It can be easy to back up, but copying a live database file is not always a consistent backup (particularly with WAL mode). Use SQLite's online backup API/CLI or a tool such as Litestream. Moving to multiple app instances or higher concurrent writes is a reason to use PostgreSQL.
+The current Go prototype uses SQLite through the pure-Go `modernc.org/sqlite` driver. This is suitable while the API is a single local instance with modest write volume. Before the family deployment, choose between:
+- **PostgreSQL for the app as well (recommended for the homelab deployment):** use a separate database and least-privilege role from Keycloak. This gives one database service to start, secure, monitor, and back up.
+- **Keep SQLite for the app:** viable for one API instance and low write concurrency. Copying a live database file is not always consistent (particularly in WAL mode); use SQLite's online backup API/CLI or a tool such as Litestream. Multiple API instances or increased concurrent writes are reasons to move to PostgreSQL.
+
+Do not have Keycloak and the app share database/schema credentials.
 
 ### Backup plan
 - Back up PostgreSQL database contents (for example, scheduled `pg_dump` for Keycloak and the app databases), app data if SQLite is chosen, Keycloak realm/configuration, Caddy configuration, app configuration, and the secrets needed for recovery.
@@ -119,7 +121,7 @@ For the app database:
 - [ ] Confirm whether results are visible to all members of the group (recommended) and how ties/round closure work.
 - [ ] Decide IP restriction scope versus VPN/overlay access.
 - [ ] Inventory current Caddy deployment, domain/DNS, Docker/systemd setup, storage, and backup destination.
-- [ ] Choose PostgreSQL for both services or PostgreSQL for Keycloak plus SQLite for the app.
+- [ ] Confirm PostgreSQL for both production services, or PostgreSQL for Keycloak plus SQLite for the app.
 
 **Done when:** these decisions and hostnames are recorded before implementation.
 
@@ -142,7 +144,7 @@ For the app database:
 **Done when:** an invited user can sign in, an uninvited user cannot access app data, and identity/session behavior is verified server-side.
 
 ### Milestone 4 — App foundations and groups
-- [ ] Create schema/migrations for users, groups, memberships, lists, activities, rounds, and votes.
+- [ ] Extend the Go API and add schema/migrations for users, groups, memberships, lists, activities, rounds, and votes.
 - [ ] Implement group and list APIs with authorization checks on every operation.
 - [ ] Add the web app shell as a subsection of the larger family app.
 - [ ] Seed the current Adventure Bucket List activities.
