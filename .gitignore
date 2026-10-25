@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local app data and backups
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.dump
+*.sql.gz
+
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
