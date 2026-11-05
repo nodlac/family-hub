@@ -3,21 +3,25 @@ package app
 import (
 	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
-var validCategories = map[string]bool{
-	"family": true, "parks": true, "motoDay": true, "motoOvernight": true,
+type Pin struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Where  string `json:"where"`
+	When   string `json:"when"`
+	Who    string `json:"who"`
+	What   string `json:"what"`
+	Pluses int    `json:"pluses"`
 }
-
-var slugPattern = regexp.MustCompile(`[^a-z0-9]+`)
 
 type Server struct {
 	db        *sql.DB
@@ -25,25 +29,46 @@ type Server struct {
 }
 
 func InitializeDatabase(db *sql.DB) error {
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS activities (
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS pins (
 		id TEXT PRIMARY KEY,
-		category TEXT NOT NULL,
 		title TEXT NOT NULL,
-		details TEXT NOT NULL DEFAULT '{}',
-		completed INTEGER NOT NULL DEFAULT 0,
-		votes INTEGER NOT NULL DEFAULT 0,
+		where_text TEXT NOT NULL DEFAULT '',
+		when_text TEXT NOT NULL DEFAULT '',
+		who_text TEXT NOT NULL DEFAULT '',
+		what_text TEXT NOT NULL DEFAULT '',
+		pluses INTEGER NOT NULL DEFAULT 0,
 		created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-	)`)
-	return err
+	)`); err != nil {
+		return err
+	}
+
+	var legacyTableExists bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'activities')`).Scan(&legacyTableExists); err != nil {
+		return err
+	}
+	if legacyTableExists {
+		_, err := db.Exec(`INSERT OR IGNORE INTO pins (id, title, where_text, when_text, who_text, what_text, pluses, created_at)
+			SELECT id, title,
+				COALESCE(json_extract(details, '$.location'), json_extract(details, '$.distance'), ''),
+				trim(COALESCE(json_extract(details, '$.season'), '') ||
+					CASE WHEN COALESCE(json_extract(details, '$.time'), '') = '' THEN ''
+					ELSE ' · ' || json_extract(details, '$.time') END),
+				'', COALESCE(json_extract(details, '$.notes'), ''), votes, created_at
+			FROM activities`)
+		if err != nil {
+			return fmt.Errorf("migrate existing activities to pins: %w", err)
+		}
+	}
+	return nil
 }
 
 func NewHandler(db *sql.DB, staticDir string) http.Handler {
 	s := &Server{db: db, staticDir: staticDir}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/activities", s.listActivities)
-	mux.HandleFunc("POST /api/initialize", s.initializeActivities)
-	mux.HandleFunc("POST /api/activities", s.createActivity)
-	mux.HandleFunc("POST /api/activities/{id}/{action}", s.updateActivity)
+	mux.HandleFunc("GET /api/pins", s.listPins)
+	mux.HandleFunc("POST /api/initialize", s.initializePins)
+	mux.HandleFunc("POST /api/pins", s.createPin)
+	mux.HandleFunc("POST /api/pins/{id}/plus", s.plusPin)
 	mux.HandleFunc("GET /", s.index)
 	mux.Handle("GET /css/", http.StripPrefix("/css/", http.FileServer(http.Dir(filepath.Join(staticDir, "css")))))
 	mux.Handle("GET /js/", http.StripPrefix("/js/", http.FileServer(http.Dir(filepath.Join(staticDir, "js")))))
@@ -58,18 +83,18 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(s.staticDir, "index.html"))
 }
 
-func (s *Server) listActivities(w http.ResponseWriter, _ *http.Request) {
-	items, err := s.getActivities()
+func (s *Server) listPins(w http.ResponseWriter, _ *http.Request) {
+	pins, err := s.getPins()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Could not load activities.")
+		writeError(w, http.StatusInternalServerError, "Could not load pins.")
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	writeJSON(w, http.StatusOK, pins)
 }
 
-func (s *Server) initializeActivities(w http.ResponseWriter, r *http.Request) {
+func (s *Server) initializePins(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		Seed map[string][]map[string]any `json:"seed"`
+		Pins []Pin `json:"pins"`
 	}
 	if err := decodeJSON(w, r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON request.")
@@ -78,195 +103,131 @@ func (s *Server) initializeActivities(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := s.db.Begin()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Could not initialize activities.")
+		writeError(w, http.StatusInternalServerError, "Could not initialize pins.")
 		return
 	}
 	defer tx.Rollback()
 
-	for category, items := range payload.Seed {
-		if !validCategories[category] {
-			continue
+	for _, pin := range payload.Pins {
+		pin.ID = strings.TrimSpace(pin.ID)
+		pin.Title = strings.TrimSpace(pin.Title)
+		if pin.ID == "" || pin.Title == "" {
+			writeError(w, http.StatusBadRequest, "Seed pins need an id and title.")
+			return
 		}
-		for _, item := range items {
-			id, _ := item["id"].(string)
-			title, _ := item["title"].(string)
-			if id == "" || title == "" {
-				writeError(w, http.StatusBadRequest, "Seed activities need an id and title.")
-				return
-			}
-			details := activityDetails(item)
-			encoded, err := json.Marshal(details)
-			if err != nil {
-				writeError(w, http.StatusBadRequest, "Invalid activity details.")
-				return
-			}
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO activities (id, category, title, details) VALUES (?, ?, ?, ?)`, id, category, title, string(encoded)); err != nil {
-				writeError(w, http.StatusInternalServerError, "Could not save seed activities.")
-				return
-			}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO pins (id, title, where_text, when_text, who_text, what_text)
+			VALUES (?, ?, ?, ?, ?, ?)`, pin.ID, pin.Title, pin.Where, pin.When, pin.Who, pin.What); err != nil {
+			writeError(w, http.StatusInternalServerError, "Could not save seed pins.")
+			return
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, "Could not initialize activities.")
+		writeError(w, http.StatusInternalServerError, "Could not initialize pins.")
 		return
 	}
 
-	items, err := s.getActivities()
+	pins, err := s.getPins()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Could not load activities.")
+		writeError(w, http.StatusInternalServerError, "Could not load pins.")
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	writeJSON(w, http.StatusOK, pins)
 }
 
-func (s *Server) createActivity(w http.ResponseWriter, r *http.Request) {
-	var item map[string]any
-	if err := decodeJSON(w, r, &item); err != nil {
+func (s *Server) createPin(w http.ResponseWriter, r *http.Request) {
+	var pin Pin
+	if err := decodeJSON(w, r, &pin); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON request.")
 		return
 	}
-	category, _ := item["category"].(string)
-	title, _ := item["title"].(string)
-	notes, _ := item["notes"].(string)
-	title = strings.TrimSpace(title)
-	notes = strings.TrimSpace(notes)
-	if !validCategories[category] {
-		writeError(w, http.StatusBadRequest, "Choose a valid activity category.")
+	pin.Title = strings.TrimSpace(pin.Title)
+	pin.Where = strings.TrimSpace(pin.Where)
+	pin.When = strings.TrimSpace(pin.When)
+	pin.Who = strings.TrimSpace(pin.Who)
+	pin.What = strings.TrimSpace(pin.What)
+	if pin.Title == "" {
+		writeError(w, http.StatusBadRequest, "An activity or place name is required.")
 		return
 	}
-	if title == "" || notes == "" {
-		writeError(w, http.StatusBadRequest, "An activity name and notes are required.")
+	if len(pin.Title) > 120 || len(pin.Where) > 240 || len(pin.When) > 160 || len(pin.Who) > 200 || len(pin.What) > 1200 {
+		writeError(w, http.StatusBadRequest, "One or more pin fields are too long.")
 		return
 	}
-	if len(title) > 120 || len(notes) > 1000 {
-		writeError(w, http.StatusBadRequest, "Activity name or notes are too long.")
-		return
-	}
-
-	id := makeID(title)
-	details := activityDetails(item)
-	encoded, err := json.Marshal(details)
+	var err error
+	pin.ID, err = makeID()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid activity details.")
+		writeError(w, http.StatusInternalServerError, "Could not create a pin ID.")
 		return
 	}
-	if _, err := s.db.Exec(`INSERT INTO activities (id, category, title, details) VALUES (?, ?, ?, ?)`, id, category, title, string(encoded)); err != nil {
-		writeError(w, http.StatusInternalServerError, "Could not save activity.")
+	if _, err := s.db.Exec(`INSERT INTO pins (id, title, where_text, when_text, who_text, what_text)
+		VALUES (?, ?, ?, ?, ?, ?)`, pin.ID, pin.Title, pin.Where, pin.When, pin.Who, pin.What); err != nil {
+		writeError(w, http.StatusInternalServerError, "Could not save pin.")
 		return
 	}
-	created, err := s.getActivity(id)
+	created, err := s.getPin(pin.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Could not load the saved activity.")
+		writeError(w, http.StatusInternalServerError, "Could not load the saved pin.")
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
 
-func (s *Server) updateActivity(w http.ResponseWriter, r *http.Request) {
-	id, action := r.PathValue("id"), r.PathValue("action")
-	var result sql.Result
-	var err error
-	switch action {
-	case "vote":
-		result, err = s.db.Exec(`UPDATE activities SET votes = votes + 1 WHERE id = ?`, id)
-	case "complete":
-		result, err = s.db.Exec(`UPDATE activities SET completed = CASE completed WHEN 0 THEN 1 ELSE 0 END WHERE id = ?`, id)
-	default:
-		writeError(w, http.StatusNotFound, "Not found.")
-		return
-	}
+func (s *Server) plusPin(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	result, err := s.db.Exec(`UPDATE pins SET pluses = pluses + 1 WHERE id = ?`, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Could not update activity.")
+		writeError(w, http.StatusInternalServerError, "Could not plus this pin.")
 		return
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Could not update activity.")
+		writeError(w, http.StatusInternalServerError, "Could not plus this pin.")
 		return
 	}
 	if rows == 0 {
-		writeError(w, http.StatusNotFound, "Activity not found.")
+		writeError(w, http.StatusNotFound, "Pin not found.")
 		return
 	}
-	updated, err := s.getActivity(id)
+	pin, err := s.getPin(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Could not load the updated activity.")
+		writeError(w, http.StatusInternalServerError, "Could not load the updated pin.")
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, pin)
 }
 
-func (s *Server) getActivities() ([]map[string]any, error) {
-	rows, err := s.db.Query(`SELECT id, category, title, details, completed, votes FROM activities ORDER BY created_at, rowid`)
+func (s *Server) getPins() ([]Pin, error) {
+	rows, err := s.db.Query(`SELECT id, title, where_text, when_text, who_text, what_text, pluses
+		FROM pins ORDER BY created_at DESC, rowid DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	items := make([]map[string]any, 0)
+	pins := make([]Pin, 0)
 	for rows.Next() {
-		item, err := scanActivity(rows)
-		if err != nil {
+		var pin Pin
+		if err := rows.Scan(&pin.ID, &pin.Title, &pin.Where, &pin.When, &pin.Who, &pin.What, &pin.Pluses); err != nil {
 			return nil, err
 		}
-		items = append(items, item)
+		pins = append(pins, pin)
 	}
-	return items, rows.Err()
+	return pins, rows.Err()
 }
 
-func (s *Server) getActivity(id string) (map[string]any, error) {
-	row := s.db.QueryRow(`SELECT id, category, title, details, completed, votes FROM activities WHERE id = ?`, id)
-	return scanActivity(row)
+func (s *Server) getPin(id string) (Pin, error) {
+	var pin Pin
+	err := s.db.QueryRow(`SELECT id, title, where_text, when_text, who_text, what_text, pluses FROM pins WHERE id = ?`, id).
+		Scan(&pin.ID, &pin.Title, &pin.Where, &pin.When, &pin.Who, &pin.What, &pin.Pluses)
+	return pin, err
 }
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanActivity(row rowScanner) (map[string]any, error) {
-	var id, category, title, detailsJSON string
-	var completed, votes int
-	if err := row.Scan(&id, &category, &title, &detailsJSON, &completed, &votes); err != nil {
-		return nil, err
-	}
-	var item map[string]any
-	if err := json.Unmarshal([]byte(detailsJSON), &item); err != nil {
-		return nil, fmt.Errorf("decode activity details: %w", err)
-	}
-	item["id"] = id
-	item["category"] = category
-	item["title"] = title
-	item["completed"] = completed != 0
-	item["votes"] = votes
-	return item, nil
-}
-
-func activityDetails(item map[string]any) map[string]any {
-	details := make(map[string]any, len(item))
-	for key, value := range item {
-		switch key {
-		case "id", "category", "title", "completed", "votes":
-			continue
-		default:
-			details[key] = value
-		}
-	}
-	return details
-}
-
-func makeID(title string) string {
-	slug := strings.Trim(slugPattern.ReplaceAllString(strings.ToLower(title), "-"), "-")
-	if len(slug) > 48 {
-		slug = strings.Trim(slug[:48], "-")
-	}
-	if slug == "" {
-		slug = "activity"
-	}
-	var random [4]byte
+func makeID() (string, error) {
+	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
-		return slug + "-activity"
+		return "", err
 	}
-	return fmt.Sprintf("%s-%x", slug, random)
+	return "pin-" + hex.EncodeToString(random[:]), nil
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {

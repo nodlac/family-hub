@@ -148,110 +148,112 @@ const bucketListData = {
     ]
 };
 
-let activities = [];
-let hideCompleted = false;
-const escapeHtml = value => String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const typeFor = category => category.startsWith('moto') ? 'moto' : category;
+const starterPins = Object.values(bucketListData).flat().map(item => ({
+    id: item.id,
+    title: item.title,
+    where: item.location || (item.distance ? `Route TBD · ${item.distance}` : ''),
+    when: [item.season, item.time].filter(Boolean).join(' · '),
+    who: '',
+    what: item.notes || ''
+}));
+
+let pins = [];
+const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[character]));
 
 async function api(path, options = {}) {
-    const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+    const response = await fetch(path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options
+    });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Request failed');
     return result;
 }
 
-function createCard(item) {
-    const type = typeFor(item.category);
+function renderField(label, value) {
+    const missing = !value;
+    return `<p class="pin-field ${missing ? 'empty' : ''}">
+        <strong>${label}</strong><span>${escapeHtml(value || 'Not set yet')}</span>
+    </p>`;
+}
+
+function createPinCard(pin) {
     const card = document.createElement('article');
-    card.className = 'card' + (item.completed ? ' completed' : '');
-    card.dataset.id = item.id;
-    let badges = '';
-    if (item.priority) badges += '<span class="badge badge-priority badge-priority-' + item.priority + '">Priority ' + escapeHtml(item.priority) + '</span>';
-    if (type === 'family') {
-        if (item.obscure) badges += '<span class="badge badge-obscure">Obscure: ' + escapeHtml(item.obscure) + '</span>';
-        if (item.season) badges += '<span class="badge badge-season">' + escapeHtml(item.season) + '</span>';
-    } else if (type === 'parks') {
-        if (item.location) badges += '<span class="badge badge-season">' + escapeHtml(item.location) + '</span>';
-    } else {
-        if (item.fun) badges += '<span class="badge">Fun: ' + escapeHtml(item.fun) + '</span>';
-        if (item.season) badges += '<span class="badge badge-season">' + escapeHtml(item.season) + '</span>';
-    }
-    let meta = '';
-    if (type === 'family') meta = [item.location && '<span>📍 ' + escapeHtml(item.location) + '</span>', item.time && '<span>⏱️ ' + escapeHtml(item.time) + '</span>', item.kidFriendly && '<span>👶 ' + (item.kidFriendly === true ? 'Kid-friendly' : escapeHtml(item.kidFriendly)) + '</span>'].filter(Boolean).join('');
-    else if (type === 'parks' && item.location) meta = '<span>📍 ' + escapeHtml(item.location) + '</span>';
-    else if (item.distance) meta = '<span>🛣️ ' + escapeHtml(item.distance) + '</span>';
-    card.innerHTML = '<div class="card-header"><h3 class="card-title">' + escapeHtml(item.title) + '</h3><div class="card-badges">' + badges + '</div></div>' +
-        '<div class="card-meta">' + meta + '</div><p class="card-notes">' + escapeHtml(item.notes) + '</p>' +
-        '<div class="card-footer"><button class="vote-btn ' + (item.votes ? 'voted' : '') + '" data-action="vote">👍 Vote <span class="vote-count">' + item.votes + '</span></button>' +
-        '<button class="check-btn ' + (item.completed ? 'completed' : '') + '" data-action="complete">' + (item.completed ? '✓ Done' : 'Mark Done') + '</button></div>';
+    card.className = 'pin-card';
+    card.dataset.id = pin.id;
+    card.innerHTML = `<h3 class="pin-title">${escapeHtml(pin.title)}</h3>
+        <div class="pin-fields">
+            ${renderField('Where', pin.where)}
+            ${renderField('When', pin.when)}
+            ${renderField('Who', pin.who)}
+            ${renderField('What to do there', pin.what)}
+        </div>
+        <div class="pin-footer">
+            <button class="plus-btn" type="button" data-action="plus" aria-label="Add a plus to ${escapeHtml(pin.title)}">
+                +1 <span>${Number(pin.pluses) || 0}</span>
+            </button>
+        </div>`;
     return card;
 }
 
-function renderCards() {
-    const groups = {family:'family-cards', parks:'parks-cards', motoDay:'moto-day-cards', motoOvernight:'moto-overnight-cards'};
-    Object.entries(groups).forEach(([category, id]) => {
-        const container = document.getElementById(id);
-        container.innerHTML = '';
-        activities.filter(item => item.category === category && (!hideCompleted || !item.completed)).forEach(item => container.appendChild(createCard(item)));
-    });
-    document.getElementById('completed-count').textContent = activities.filter(item => item.completed).length + ' completed';
+function renderPins() {
+    const board = document.getElementById('pin-board');
+    board.replaceChildren();
+    document.getElementById('pin-count').textContent = `${pins.length} ${pins.length === 1 ? 'pin' : 'pins'}`;
+    if (!pins.length) {
+        board.innerHTML = '<p class="empty-board">No pins yet. Add an idea to get started.</p>';
+        return;
+    }
+    pins.forEach(pin => board.appendChild(createPinCard(pin)));
 }
 
-async function loadActivities() {
+async function loadPins() {
     try {
-        activities = await api('/api/initialize', {method:'POST', body:JSON.stringify({seed:bucketListData})});
-        renderCards();
+        pins = await api('/api/initialize', {
+            method: 'POST',
+            body: JSON.stringify({ pins: starterPins })
+        });
+        renderPins();
     } catch (error) {
-        document.getElementById('app-message').textContent = 'Could not connect to the API. Start the app with: go run ./cmd/family-hub (' + error.message + ')';
+        document.getElementById('app-message').textContent =
+            'Could not connect to the API. Start the app with: go run ./cmd/family-hub (' + error.message + ')';
     }
 }
 
-const freshIdeas = [
-    {id:'swell-wedge',category:'motoDay',title:'The Wedge overlook & dirt-road loop',distance:'Full day; route-dependent',season:'Spring/Fall',fun:'★★★★★',priority:2,notes:'Ride legal dirt roads to the San Rafael Swell’s Wedge overlook. Match the route to your group; check BLM maps, conditions, and fuel range.'},
-    {id:'burr-trail-dirt',category:'motoOvernight',title:'Burr Trail & Henry Mountains dirt-road trip',distance:'2-3 days; route-dependent',season:'Spring/Fall',fun:'★★★★★',priority:2,notes:'Plan a dirt/adventure-bike trip on public roads near the Burr Trail and Henry Mountains. Verify road status, weather, permits, and fuel.'},
-    {id:'baja-divide',category:'motoOvernight',title:'Baja Divide section ride',distance:'Multi-day; choose a section',season:'November-April',fun:'★★★★★',priority:2,notes:'Choose a manageable segment for a dirt-bike trip. Research current route notes, border requirements, water, fuel, and emergency plans.'},
-    {id:'cedar-mountain',category:'motoDay',title:'Cedar Mountain / Skull Valley gravel adventure',distance:'Full day; remote',season:'Spring/Fall',fun:'★★★★☆',priority:2,notes:'Explore only legal public roads across the West Desert. Check land ownership, closures, weather, fuel, and carry water and recovery gear.'},
-    {id:'escalante-dirt',category:'motoOvernight',title:'Grand Staircase-Escalante dirt-road campout',distance:'2-4 days',season:'Spring/Fall',fun:'★★★★★',priority:2,notes:'Build a legal dirt-road itinerary using current BLM maps. Avoid flash-flood-prone canyons and wet clay; plan fuel, water, and camping.'},
-    {id:'dutch-john',category:'motoDay',title:'Flaming Gorge backcountry roads',distance:'Full day',season:'Late Spring-Fall',fun:'★★★★☆',priority:3,notes:'Link legal gravel roads and viewpoints near Dutch John. Check seasonal gates, land-manager rules, and road conditions.'}
-];
+document.getElementById('pin-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const fields = new FormData(form);
+    const pin = Object.fromEntries(['title', 'where', 'when', 'who', 'what'].map(key => [
+        key, String(fields.get(key) || '').trim()
+    ]));
+    try {
+        const created = await api('/api/pins', { method: 'POST', body: JSON.stringify(pin) });
+        pins.unshift(created);
+        renderPins();
+        form.reset();
+        document.getElementById('app-message').textContent = 'Pin added to the board.';
+    } catch (error) {
+        document.getElementById('app-message').textContent = error.message;
+    }
+});
 
 document.addEventListener('click', async event => {
-    const button = event.target.closest('[data-action]');
-    if (button) {
-        try {
-            const card = button.closest('.card');
-            const updated = await api('/api/activities/' + encodeURIComponent(card.dataset.id) + '/' + button.dataset.action, {method:'POST'});
-            activities = activities.map(item => item.id === updated.id ? updated : item);
-            renderCards();
-        } catch (error) { document.getElementById('app-message').textContent = error.message; }
-    }
-    const filterButton = event.target.closest('.filter-btn');
-    if (filterButton) {
-        document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b === filterButton));
-        const filter = filterButton.dataset.filter;
-        document.querySelectorAll('.section').forEach(section => section.style.display = filter === 'all' || section.id === filter ? 'block' : 'none');
-    }
-    if (event.target.closest('#generate-idea')) {
-        const available = freshIdeas.filter(idea => !activities.some(item => item.id === idea.id));
-        if (!available.length) { document.getElementById('app-message').textContent = 'All current fresh-idea suggestions have been added.'; return; }
-        const idea = available[Math.floor(Math.random() * available.length)];
-        try { activities.push(await api('/api/activities', {method:'POST',body:JSON.stringify(idea)})); renderCards(); }
-        catch (error) { document.getElementById('app-message').textContent = error.message; }
-    }
-});
-
-document.getElementById('hide-completed').addEventListener('change', event => { hideCompleted = event.target.checked; renderCards(); });
-document.getElementById('activity-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    const fields = new FormData(event.currentTarget);
-    const category = fields.get('category');
-    const idea = {category, title:fields.get('title').trim(), notes:fields.get('notes').trim(), priority:2, season:fields.get('season').trim()};
-    if (category.startsWith('moto')) idea.distance = fields.get('distance').trim();
-    else idea.location = fields.get('distance').trim();
+    const button = event.target.closest('[data-action="plus"]');
+    if (!button) return;
+    button.disabled = true;
     try {
-        activities.push(await api('/api/activities', {method:'POST',body:JSON.stringify(idea)}));
-        event.currentTarget.reset(); renderCards(); document.getElementById('app-message').textContent = 'Activity saved.';
-    } catch (error) { document.getElementById('app-message').textContent = error.message; }
+        const card = button.closest('.pin-card');
+        const updated = await api('/api/pins/' + encodeURIComponent(card.dataset.id) + '/plus', { method: 'POST' });
+        pins = pins.map(pin => pin.id === updated.id ? updated : pin);
+        renderPins();
+        document.getElementById('app-message').textContent = 'Plus added.';
+    } catch (error) {
+        button.disabled = false;
+        document.getElementById('app-message').textContent = error.message;
+    }
 });
 
-document.addEventListener('DOMContentLoaded', loadActivities);
+document.addEventListener('DOMContentLoaded', loadPins);

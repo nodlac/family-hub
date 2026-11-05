@@ -1,182 +1,104 @@
-# Family App Plan
+# Family Hub — Plan
 
-## Purpose
+## Product direction
 
-Build a private, invite-only family app that can grow over time. The first feature is an Adventure Bucket List with group-specific lists and shared voting rounds. The website and a future iOS app will use the same API and identity system.
+Family Hub is the broader invite-only app. **Adventure Pinboard** is its first feature, not a separate voting or bucket-list product. The goal is to make family ideas easy to save and discuss.
 
-This plan assumes “shared/public votes” means that results are visible to members of the relevant group, **not** that the polls are anonymously available to everyone on the internet.
+Each pin answers:
+- **Where**: place, area, or route.
+- **When**: a date, season, or best time to go.
+- **Who**: the people interested or invited.
+- **What to do there**: activities, notes, and eventually useful links.
 
-## Product requirements
+A member can add a **+1** to show interest. The current local prototype counts every click; once accounts exist, decide whether each member can +1 a pin once or whether repeated +1s are intentional. No voting rounds, rankings, completion tracking, or itinerary workflow are needed for the initial feature.
 
-### Accounts, groups, and permissions
-- Family members sign in with Google through Keycloak.
-- Being able to sign in is not enough to use the app: an app administrator must invite/approve the person, and the API must verify their group membership.
-- A person can belong to multiple groups.
-- Each group has its own members, lists, and list activity. One group must not be able to read or modify another group's private data.
-- Start with three roles:
-  - **App admin:** manage app-level settings and groups.
-  - **Group admin:** invite/remove group members and manage that group's lists and rounds.
-  - **Member:** view group lists and participate in rounds.
-- Decide whether group admins can be ordinary participants in votes (recommended: yes).
+Support separate pinboards for separate groups in the larger Family Hub. Pins and +1s are visible to that board's members, not to the public internet.
 
-### Adventure Bucket List feature
-- A group can have multiple lists (for example, family trips, motorcycle rides, or a particular event).
-- Lists contain activities/destinations, initially entered as seed data and later editable through the app if desired.
-- A list can run multiple voting rounds/polls.
-- A round contains an “on deck” set of activities and has a lifecycle such as draft → open → closed → archived.
-- Members can vote while a round is open. Results are shared with eligible members; closed rounds retain their results.
-- Group/list administrators can create a round, select its on-deck activities, open/close it, and record the activity selected/planned.
-- Keep past rounds and results rather than overwriting them.
-- Add links to destinations later. TODO: add official park/land-management, access, reservation, road-condition, and safety links as applicable.
+## Current prototype
 
-### Voting rule to decide before implementation
-Recommended simple first version: **each member chooses one activity per open round**. The API enforces one vote per member per round; members can change that choice until the round closes. If instead people should vote for multiple activities, choose a maximum number per member and encode that limit in the API/database. Do not leave the rule implicit.
+- Static HTML/CSS/JavaScript pinboard UI.
+- Go `net/http` API and SQLite storage.
+- Starter adventure ideas are seeded into the board the first time the UI loads.
+- The previous activity-list SQLite data is migrated to pins on startup.
+- The API listens on `127.0.0.1:8000` by default.
+- There is no authentication or authorization yet. Do not expose the prototype through Caddy or to family members over a network.
+
+## Stretch goal: themed trip generator
+
+Add a generator that takes a theme—such as beach, national park, camping, museum, or easy day trip—and suggests a family trip. The generated suggestion should be reviewable as a pin with Where, When, Who, and What to do there, then added to the board only when a family member chooses to save it.
+
+Keep this as a stretch goal. Begin with curated suggestions or a simple rule-based generator; consider an external data/AI service only if it adds real value. Generated destination, access, safety, season, and reservation details must be checked before treating them as reliable.
 
 ## Architecture
 
 ```text
-Web browser ─┐
-             ├── HTTPS via Caddy ── App/API ── App database
-Future iOS ──┘                       │
-                                     └── Keycloak (OIDC) ── PostgreSQL
-                                           └── Google sign-in
+Web app (later iOS app) ── HTTPS via Caddy ── Go API ── App database
+                                                   │
+                                                   └── Keycloak (OIDC) ── PostgreSQL
+                                                        └── Google sign-in
 ```
 
-- **Caddy:** HTTPS, reverse proxy, and any agreed IP/network access restrictions.
-- **Keycloak:** self-hosted OIDC identity provider; Google is an upstream sign-in option.
-- **PostgreSQL:** production database for Keycloak. The app can use a separate PostgreSQL database/role, or SQLite if the single-instance/low-write tradeoff is deliberately chosen.
-- **Go app/API:** owns the app's data and authorization. Clients never connect directly to either database. Use Go's `net/http` initially, with database access isolated behind app/store code.
-- Keep services on a private server/container network where possible; expose only the required HTTPS endpoints.
+- **Caddy:** HTTPS and reverse proxy; apply the chosen network/IP restrictions.
+- **Go API:** serves the app, owns pin data, +1 behavior, group access checks, and app authorization.
+- **Keycloak:** self-hosted identity provider; Google is an upstream sign-in option.
+- **PostgreSQL:** production database for Keycloak. Before family deployment, decide whether the app moves from SQLite to PostgreSQL too. If both use PostgreSQL, use separate databases and least-privilege roles.
+- **iOS:** a later client that calls the same API and uses OIDC Authorization Code with PKCE.
 
-## Authentication and network access
+## Authentication, groups, and access
 
-1. Choose stable HTTPS hostnames (for example `auth.example.net` and `app.example.net`) and confirm they resolve/reach the homelab as needed.
-2. Configure Caddy to proxy the Keycloak hostname and app/API. Configure Keycloak's public hostname and trusted proxy headers correctly for the deployed version.
-3. Create a dedicated Keycloak realm for the family app; do not use the `master` realm for application users.
-4. Configure Google as a Keycloak identity provider. Register Keycloak's broker callback URL with Google; it will resemble:
-   `https://auth.example.net/realms/<realm>/broker/google/endpoint`
-5. Disable unrestricted app registration or otherwise enforce invitations. The API must check group membership on every protected operation; Google login alone must not grant app access.
-6. For the web client, prefer an API/backend-for-frontend OIDC flow with a server-side session and `Secure`, `HttpOnly`, appropriately `SameSite` cookies. Protect state-changing cookie-authenticated requests against CSRF.
-7. For the future iOS app, register a separate public OIDC client and use Authorization Code with PKCE. Do not embed a client secret in the app.
-8. Validate issuer, signature, expiry, and audience/client claims server-side. Use the stable OIDC subject (`sub`) as the identity key, not email as the permanent identifier.
+1. Choose stable HTTPS hostnames and confirm family members can reach them.
+2. Configure Caddy to proxy the app and Keycloak; configure Keycloak's external hostname and trusted proxy headers for the deployed version.
+3. Create a dedicated Keycloak realm for Family Hub; do not use the `master` realm for application users.
+4. Configure Google as a Keycloak identity provider. Google needs Keycloak's broker callback URL, similar to `https://auth.example.net/realms/<realm>/broker/google/endpoint`.
+5. Make access invite-only. Google sign-in alone must not grant app access; the API must check group membership on every protected request.
+6. Use a server-side OIDC/session flow for the web app, with `Secure` and `HttpOnly` cookies and CSRF protection for state-changing requests. Use a separate iOS client with PKCE later.
+7. Identify users by the stable OIDC subject (`sub`), not email as a permanent identifier.
 
-### IP restriction decision
-The requested IP restriction needs a deliberate scope:
-- Restricting **only administration** (Keycloak admin and app admin endpoints) by IP/VPN is compatible with family members using the app remotely.
-- Restricting **the entire app/login service to one public IP** will prevent use from cellular networks and other homes, and residential IPs may change. That would conflict with convenient future iOS use.
-- Alternatives for a private family service are an IP allowlist for administration plus invite-only app access, or a private VPN/overlay such as Tailscale/WireGuard for all app access.
+### Network restriction
 
-Record which option is selected before opening the service to family members. Do not assume “Google sign-in” makes an otherwise public endpoint private.
+Decide whether the IP restriction applies to the entire app or only administration. A single-home-IP restriction can block family members on cellular or at other homes, and residential IPs can change. Restricting admin access by IP/VPN while keeping the family app invite-only is usually more compatible with future iOS use. Tailscale/WireGuard is another option for keeping all family access private.
 
-## Data model (initial proposal)
+## Initial data model
 
-Use database foreign keys and constraints so group isolation and voting rules are enforced below the UI.
+Keep it small for the first feature:
+- `users`: OIDC issuer/subject and profile information.
+- `groups` and `group_memberships`: group membership and role.
+- `pinboards`: group-owned board metadata.
+- `pins`: board, title, where, when, who, what, timestamps.
+- `pin_pluses`: pin and member, if the decided rule is one +1 per person.
 
-- `users`: internal ID, OIDC issuer/subject, display name, email (profile/contact attribute).
-- `groups`: name and metadata.
-- `group_memberships`: group, user, role, status; unique group/user membership.
-- `invitations`: group, inviter, invitation token hash, expiry, redemption/status (only if implementing in-app invitations).
-- `lists`: owning group, name, description, visibility/settings.
-- `activities`: list, title, notes, location/season/links and optional archive state.
-- `rounds`: list, title, status, open/close timestamps, selected/planned activity.
-- `round_activities`: activities placed “on deck” in a particular round.
-- `votes`: round, user, chosen activity, timestamp. Add a uniqueness constraint for one vote per user per round if using the recommended voting rule.
+The API must scope every pinboard query by the authenticated user's membership. A board ID from the client does not establish access.
 
-All API queries must scope data by authenticated user membership in the relevant group. A client-provided group/list ID is not proof of access.
+## Data and backups
 
-## Database choice and backups
+- Keycloak must use a supported production database such as PostgreSQL; SQLite is not a supported production Keycloak database.
+- The current Go prototype uses SQLite, suitable for one local API instance and modest write volume. It migrates the old activity records into a new pins table without discarding their text or count.
+- For the homelab deployment, PostgreSQL for the app as well as Keycloak is a reasonable default, with separate database names and roles. Retaining SQLite for the app is also possible for one API instance, but use SQLite's online backup mechanism or a tool such as Litestream; do not blindly copy a live WAL database file.
+- Back up database data, Keycloak configuration, Caddy/app configuration, and required secrets. Use encrypted off-host backups (for example Restic or Borg), set retention, and test restoration.
 
-### Recommendation
-Use PostgreSQL for Keycloak; Keycloak's supported production database choices include PostgreSQL, and SQLite is not a supported production Keycloak database. Do not use its development/in-memory database for the family service.
+## Homelab operations and security
 
-The current Go prototype uses SQLite through the pure-Go `modernc.org/sqlite` driver. This is suitable while the API is a single local instance with modest write volume. Before the family deployment, choose between:
-- **PostgreSQL for the app as well (recommended for the homelab deployment):** use a separate database and least-privilege role from Keycloak. This gives one database service to start, secure, monitor, and back up.
-- **Keep SQLite for the app:** viable for one API instance and low write concurrency. Copying a live database file is not always consistent (particularly in WAL mode); use SQLite's online backup API/CLI or a tool such as Litestream. Multiple API instances or increased concurrent writes are reasons to move to PostgreSQL.
+- Start Caddy, Keycloak, database, and app automatically after host reboot using systemd or Docker Compose restart policies.
+- Use persistent volumes, health checks, and application retry behavior; container start order alone does not guarantee database readiness.
+- Pin service versions, keep secrets out of Git and clients, use strong admin credentials/MFA, and limit exposed ports.
+- Test a complete reboot and a backup restore before inviting family members.
+- The current prototype has no auth: keep its default localhost binding until authentication and API authorization are implemented.
 
-Do not have Keycloak and the app share database/schema credentials.
+## Implementation order
 
-### Backup plan
-- Back up PostgreSQL database contents (for example, scheduled `pg_dump` for Keycloak and the app databases), app data if SQLite is chosen, Keycloak realm/configuration, Caddy configuration, app configuration, and the secrets needed for recovery.
-- Use an encrypted backup tool such as Restic or Borg. Store backups off the homelab, and optionally keep a separate local/NAS copy. A copy only on the same server does not protect against server or disk failure.
-- Keep backup credentials/keys separate from the host being backed up. Protect secrets and database dumps as sensitive data.
-- Set schedule and retention, then test restoring into a clean environment. A backup is not proven until restore has been tested.
-- Define acceptable data loss (RPO) and recovery time (RTO). For an initial family app, daily database backups plus a restore test may be sufficient; tighten the schedule if needed.
-
-## Homelab reliability and security
-
-- Ensure the host's service manager starts Docker (if used) on boot. Set Caddy, Keycloak, PostgreSQL, and the app/API to start automatically after restart (systemd units or Compose restart policies such as `unless-stopped`).
-- Use health checks and make the app/API retry database/Keycloak dependencies during startup; container start order alone does not guarantee a dependency is ready.
-- Store database files and service state in persistent volumes, not disposable container filesystems.
-- Pin stable service image versions and plan updates. Keep a rollback path and do not automatically adopt untested major upgrades.
-- Use strong unique admin credentials, MFA for administrators where practical, least-privilege database users, and private networking between services.
-- Keep OAuth client secrets, database passwords, signing/configuration secrets, and backup credentials out of Git and out of browser/mobile code.
-- Limit Caddy exposure to required ports/services. Restrict administrative endpoints by IP/VPN if possible; log authentication/admin events without logging tokens or secrets.
-- Test reboot recovery and backup restoration before relying on the platform.
-
-## Implementation milestones and acceptance criteria
-
-### Milestone 1 — Decisions and inventory
-- [ ] Confirm group roles and invitation/approval process.
-- [ ] Confirm one-vote-per-round rule (or selected alternative).
-- [ ] Confirm whether results are visible to all members of the group (recommended) and how ties/round closure work.
-- [ ] Decide IP restriction scope versus VPN/overlay access.
-- [ ] Inventory current Caddy deployment, domain/DNS, Docker/systemd setup, storage, and backup destination.
-- [ ] Confirm PostgreSQL for both production services, or PostgreSQL for Keycloak plus SQLite for the app.
-
-**Done when:** these decisions and hostnames are recorded before implementation.
-
-### Milestone 2 — Reliable base services
-- [ ] Set up persistent PostgreSQL for Keycloak; create separate credentials/databases for each application.
-- [ ] Deploy a pinned Keycloak version with persistent configuration/state.
-- [ ] Configure Caddy HTTPS/reverse proxy and Keycloak's external URL/proxy settings.
-- [ ] Add automatic boot/restart behavior, health checks, and startup retries.
-- [ ] Verify a full host reboot brings services back without manual steps.
-
-**Done when:** Keycloak and its database survive a reboot and are reachable only over the intended network paths.
-
-### Milestone 3 — Identity and membership
-- [ ] Create the family-app realm and Google identity provider.
-- [ ] Set up the web client and narrowly scoped redirect URLs.
-- [ ] Disable open registration; create/approve a test family user.
-- [ ] Implement API token/session verification and group membership checks.
-- [ ] Verify a signed-in but uninvited user is denied by the API.
-
-**Done when:** an invited user can sign in, an uninvited user cannot access app data, and identity/session behavior is verified server-side.
-
-### Milestone 4 — App foundations and groups
-- [ ] Extend the Go API and add schema/migrations for users, groups, memberships, lists, activities, rounds, and votes.
-- [ ] Implement group and list APIs with authorization checks on every operation.
-- [ ] Add the web app shell as a subsection of the larger family app.
-- [ ] Seed the current Adventure Bucket List activities.
-
-**Done when:** members of one group cannot see or alter another group's lists by changing request IDs.
-
-### Milestone 5 — Voting rounds
-- [ ] Implement on-deck activity selection, draft/open/closed/archived round lifecycle, voting, result display, and selected/planned activity.
-- [ ] Enforce vote limits and round state in the API and database, not just in the UI.
-- [ ] Replace current browser-local votes/completion state with API persistence.
-- [ ] Add clear loading, empty, error, and closed-round states.
-
-**Done when:** votes are shared among authorized group members, vote rules cannot be bypassed with direct API requests, and old rounds/results remain available.
-
-### Milestone 6 — Backups, operations, and family rollout
-- [ ] Automate encrypted off-host backups with documented retention.
-- [ ] Perform a restore test for the database, Keycloak configuration, app configuration, and Caddy configuration.
-- [ ] Test boot recovery, dependency restart, expired sessions, loss of internet/Google availability, and Keycloak downtime.
-- [ ] Review Caddy exposure, admin IP/VPN restriction, logs, updates, and secret handling.
-- [ ] Add activity links later as a separate content task.
-
-**Done when:** the service can be recovered from backup and family members can use it with the intended network restrictions.
-
-### Milestone 7 — iOS client (later)
-- [ ] Build a native iOS app using the existing API and a separate Keycloak OIDC client with PKCE.
-- [ ] Reuse group/list/round authorization on the API; do not duplicate trust decisions in the app.
-- [ ] Test sign-in, sign-out, token renewal, and account/group removal on device.
+1. Finish the pinboard experience: Where/When/Who/What fields, add a pin, list pins, and +1. Keep the initial interface simple and mobile-friendly.
+2. Finalize +1 semantics and which family groups/boards are needed.
+3. Inventory the homelab, Caddy, DNS, service manager, storage, and desired IP/VPN access.
+4. Set up persistent Keycloak + PostgreSQL behind Caddy, configure Google sign-in, and establish invite-only family access.
+5. Add user/group/board authorization and persistent member-aware +1s to the Go API. Replace SQLite with PostgreSQL if selected for family deployment.
+6. Configure automatic service startup, encrypted off-host backups, restore tests, and reboot tests.
+7. Integrate the pinboard into the broader Family Hub navigation; build an iOS client later against the same API.
+8. Stretch goal: add the themed trip generator, then let users save a reviewed suggestion as a pin.
 
 ## Explicitly deferred
 
-- Adding destination/official/safety links (recorded TODO above).
-- Public internet access to polls or unauthenticated results.
-- Editing all activity metadata in the app (unless desired during the first release).
-- iOS app implementation until the API, identity, and web experience are established.
-- High availability or multi-server deployment; this is initially a single homelab host, so backups and recovery are the priority.
+- Poll rounds, rankings, trip scheduling, and completed-trip workflows.
+- Public, unauthenticated boards or results.
+- A native iOS app until the API and access model are ready.
+- The themed trip generator until the basic pinboard, groups, and authentication work.
+- Fully editable trip-planning links and external data integration; links can be added to pin content as a later improvement.

@@ -70,7 +70,7 @@ func main() {
 		}
 	}()
 
-	log.Printf("Family Hub — Adventure Bucket List prototype at http://%s", addr)
+	log.Printf("Family Hub — Adventure Pinboard prototype at http://%s", addr)
 	log.Printf("SQLite database: %s", absDBPath)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
